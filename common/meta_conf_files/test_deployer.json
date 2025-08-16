@@ -1,0 +1,17 @@
+{
+    "name" : "test_deployer_json",
+    "tasks": [
+        {
+            "task_key" : "job_deployer",
+            "notebook_task" : {
+                "notebook_path" : "D:\\0. Project\\ssot\\common\\meta_conf_files\test_deployer.json",
+                "base_parameters" : {
+                    "app" : "app_test",
+                    "env" : "prod",
+                    "team" : "team1"
+                }
+            }
+        }
+        
+    ]
+}

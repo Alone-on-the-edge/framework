@@ -1,0 +1,18 @@
+{
+    "src_db" : "oracle",
+    "src_dbs" : [
+        {
+            "host" : "abc.com",
+            "port" : 1521,
+            "database" : "database1",
+            "database_alias" : "db_alias1",
+            "schemas" : [
+                "schema1", "common"
+            ]
+        }
+    ],
+    "table_names" : ["table1","table2","table3","table4","table5","table6","table7","table8","table9","table10","table11"],
+    "delta_db" : "test_fit_db",
+    "delta_partition_cols" : [ "__schema_id"],
+    "tenancy_conf" : { "tenancy_type" : "single"}
+}
