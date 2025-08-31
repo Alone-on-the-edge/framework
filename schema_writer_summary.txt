@@ -1,0 +1,284 @@
+Schema Writer Overview
+----------------------
+Schema Writer(Short Summary)
+
+- Spark Structured Streaming job that reads Kafka schema topic messages.
+- Normalizes keys (db.schema.table format) and filters out generic_wrapper schema.
+- Generates a stable Avro fingerprint from raw schema JSON (matches producer messages).
+- Preprocesses schema (lowercases names if needed, caps decimals at 38) for Spark compatibility.
+- Saves schema files to S3 under <db.schema.table>/<fingerprint>.avsc path.
+- Uses completed_batches Delta table + checkpoints to ensure exactly-once writes (skip duplicates).
+- This JAR in libs contains Scala code for fingerprinting, preprocessing, and UDFs registered via _jvm.
+
+	The Schema Writer is a Spark Structured Streaming job that listens to a Kafka schema topic and builds a clean, versioned schema catalog in S3. This catalog is later used by other pipelines (like Bronze and Silver) to 
+	decode data messages correctly.
+
+	What it does:
+
+	1. Read schema messages from Kafka
+	   Kafka sends the table name in the message key and the Avro schema JSON in the value.
+	   Both key and value are initially bytes, so the job converts them to strings.
+
+	2. Normalize the table key
+	   Changes everything to lowercase.
+	   Removes Oracle C## prefixes.
+	   If a message is a GoldenGate heartbeat (only 2 parts), it adds gg. so everything follows a db.schema.table format.
+
+	3. Filter out generic wrapper schema
+	   Ignores the common message envelope schema (generic_wrapper) since it is the same for all topics and not table-specific.
+
+	4. Fingerprint and preprocess schemas
+	   Fingerprint: Generates a unique 64-bit ID based on the raw schema JSON. This ID is stable and matches what producers send in their data messages.
+	   Preprocess: Cleans the schema JSON to make it Spark-friendly.
+	   Lowercases column names (if configured).
+	   Caps decimal precision to Spark’s maximum (38).
+	   Recursively fixes nested structures.
+
+	5. Write schema files to S3
+	   Each schema is saved under a deterministic path:
+	   <schemas-prefix>/<db.schema.table>/<schema_fingerprint>.avsc
+	   This acts like a lightweight schema registry in S3.
+
+	6. Ensure exactly-once writes
+	   Spark Structured Streaming runs in micro-batches (small groups of Kafka messages).
+	   A custom completed_batches Delta table logs every processed batch.
+	   Before writing a batch, the job checks if it is already done (including across month boundaries).
+	   This guarantees schemas are not duplicated if Spark retries a batch.
+
+	7. Checkpointing
+	   Spark uses a checkpoint directory to track Kafka offsets and progress so the job can restart safely.
+
+	Why this matters:
+	Provides a reliable, version-controlled schema store for all tables.
+	Makes schema changes easy to detect and manage.
+	Avoids duplicate writes or messy duplicates in S3.
+	Keeps downstream data pipelines robust and Spark-compatible.
+
+
+NOTES/CLARIFICATIONS:
+---------------------
+	1.spark.sparkContext._jvm.com.adp.ssot.SparkUserDefinedFunctions.register() : “In the JVM, go to the com.adp.ssot.SparkUserDefinedFunctions Scala object, and call its register() method.”
+		spark.sparkContext._jvm is a Py4J bridge object that lets you call Java/Scala classes and methods running inside the Spark JVM from Python.
+	2.If you do not include the previous month check, Spark could reprocess and rewrite schemas after a restart that crosses a month boundary.
+
+	Scenario without the previous month check:
+	1. A batch runs at the end of the month. Example: August 31, 23:59:59. The completed_batches table logs this batch with yyyymm = 202508.
+	2. The job crashes or Spark restarts after writing to S3 but before updating the checkpoint.
+	3. When Spark restarts on September 1, it sees the checkpoint is behind and replays the same batch (batch_id = 200).
+	4. Your code only looks for this batch in the current month (202509). It cannot find it and assumes this batch is new.
+	5. Spark reprocesses the same batch and rewrites schemas to S3, creating duplicate records in the log.
+
+	Impact:
+	- Schema files are written again. Since they are named by fingerprint, they are overwritten rather than corrupted, but you waste compute and S3 writes.
+	- The completed_batches table gets duplicate entries.
+	- This can cause confusion during auditing or debugging.
+
+	Why the previous month check matters:
+	By looking at both the current and previous month partitions, your code detects batches processed just before midnight and avoids reprocessing them. This guarantees idempotency and prevents duplicate work if Spark restarts 
+	after the month changes.
+
+READ:
+-----
+	Spark Structured Streaming Cheat Sheet (Kafka + foreachBatch Context)
+
+	1. What Spark Structured Streaming Is:
+	   - Spark Structured Streaming is a high-level API for continuous processing of data streams.
+	   - It treats streams as unbounded DataFrames.
+	   - Data is processed in small micro-batches (default mode) or continuous mode.
+	   - Each micro-batch collects new records since the last batch and processes them as a static DataFrame.
+
+	2. How It Works with Kafka:
+	   - Spark reads Kafka topics as a DataFrame with binary key, value, offset, partition, and timestamp.
+	   - Typical code:
+		   df = (spark.readStream
+					.format("kafka")
+					.option("kafka.bootstrap.servers", "<brokers>")
+					.option("subscribe", "<topic>")
+					.load())
+	   - Keys and values are cast to string for readability:
+		   df = df.selectExpr("CAST(key AS STRING)", "CAST(value AS STRING)")
+
+	3. Micro-batch Execution:
+	   - Spark checks Kafka for new messages, creates a batch DataFrame, and assigns a batch_id.
+	   - The foreachBatch function is called once per batch:
+		   def process_batch(batch_df, batch_id):
+			   print(f"Processing batch {batch_id}")
+			   batch_df.show()
+	   - Spark commits offsets after successful processing and checkpointing.
+
+	4. foreachBatch:
+	   - foreachBatch lets you use any batch logic (write to S3, Delta, external systems).
+	   - You can treat batch_df like a normal static DataFrame.
+	   - Example:
+		   (df.writeStream
+			   .foreachBatch(process_batch)
+			   .option("checkpointLocation", "/path/to/checkpoint")
+			   .start())
+
+	5. Checkpointing:
+	   - A checkpoint directory stores:
+		   - Kafka offsets
+		   - Query metadata
+	   - On restart, Spark uses this directory to resume from the last committed offsets.
+	   - This makes streaming jobs fault-tolerant.
+
+	6. Exactly-Once Delivery (Practical):
+	   - Spark guarantees at-least-once delivery.
+	   - To achieve exactly-once behavior, pipelines use:
+		   - Deterministic paths for output files (overwrite-safe)
+		   - A log table (like completed_batches) to mark processed batches
+	   - This avoids duplicate writes if a batch is replayed.
+
+	7. Triggers:
+	   - Control when batches are created.
+	   - Default: process as soon as data is available.
+	   - .trigger(processingTime="10 seconds") creates a batch every 10 seconds.
+	   - .option("maxOffsetsPerTrigger", N) limits Kafka records per batch.
+
+	8. Kafka Offsets:
+	   - Spark tracks offsets in checkpoints.
+	   - If a batch fails after writing but before committing offsets, it may replay that batch.
+	   - Exactly-once sinks or deduplication logic handle this gracefully.
+
+	9. Monitoring Streaming Jobs:
+	   - streaming_query.status shows overall state (ACTIVE, TERMINATED).
+	   - streaming_query.lastProgress shows metrics like:
+		   - InputRowsPerSecond
+		   - BatchDuration
+		   - EventTime and ProcessingTime latency
+	   - The Spark UI Structured Streaming tab shows detailed metrics.
+
+	10. Schema Writer Example Context:
+		- Kafka schema topic is read as a stream.
+		- foreachBatch saves schemas to S3, logs batch IDs.
+		- completed_batches table prevents duplicates.
+		- Micro-batch + checkpoint flow is standard for Bronze and Schema Merger too.
+
+	Summary:
+	Spark Structured Streaming continuously reads data from Kafka in micro-batches.
+	Each batch becomes a static DataFrame passed to foreachBatch with a unique batch_id.
+	Checkpoints store offsets and query state for fault tolerance.
+	Additional deduplication logic (like completed_batches) ensures exactly-once writes.
+
+PERFORMANCE DEBUGGING:
+------------------------
+	Databricks on AWS: Streaming Lag and Performance Guide (Schema Writer)
+
+	A) Where to check health and lag (Databricks + AWS)
+
+	1) Databricks Spark UI
+	   - Compute (cluster) → Spark UI → Structured Streaming → select your query (schema_writer).
+	   - Check per-batch metrics: numInputRows, durationMs (triggerExecution, addBatch), processedRowsPerSecond.
+	   - Goal: batch duration stays small and stable; no growing delays.
+
+	2) Programmatic in notebook
+	   - print(streaming_query.status)
+	   - print(streaming_query.lastProgress)
+	   - for p in streaming_query.recentProgress: print(p.get("batchId"), p.get("numInputRows"), p.get("durationMs"))
+	   - If addBatch is large, foreachBatch (S3 writes) is the bottleneck. If triggerExecution is large with tiny addBatch, source or scheduling is the issue.
+
+	3) Completed batches table (Delta)
+	   - SQL:
+		 SELECT stream_name, batch_id, completed_at, yyyymm
+		 FROM <db>.<completed_batches>
+		 WHERE app = '<app>' AND stream_name = 'SCHEMA_WRITER'
+		 ORDER BY completed_at DESC;
+	   - Steady, gap-free growth = healthy. Repeats = replays. Large gaps = slow batches.
+
+	4) Kafka consumer lag (AWS MSK)
+	   - If using Amazon MSK, check CloudWatch metrics:
+		 - KafkaConsumerLag (or GetOffsetShell/consumer-groups CLI from a jump host)
+		 - Per-partition lag if available
+	   - CLI example (off cluster/jump host):
+		 kafka-consumer-groups.sh --bootstrap-server <broker:9092> --group <your_group> --describe
+	   - If lag grows, the stream is not keeping up.
+
+	5) GoldenGate heartbeat (optional)
+	   - Compare heartbeat message timestamp vs processing time. Large gap = end-to-end lag upstream or downstream.
+
+	B) AWS storage and networking checks
+
+	1) S3 write path (sink)
+	   - Your foreachBatch writes small .avsc files to S3.
+	   - Check S3 CloudWatch: 4xx/5xx counts, FirstByteLatency, TotalRequestLatency, Throttling (SlowDown).
+	   - Ensure buckets are in the same region as the Databricks workspace and MSK to minimize latency.
+
+	2) S3 access path optimization
+	   - Use VPC endpoints (Gateway endpoint for S3) so traffic stays on AWS backbone; reduces latency and egress.
+	   - If using PrivateLink to Kafka (MSK), ensure security groups and NACLs allow traffic from cluster subnets.
+	   - Instance Profile (IAM Role for EC2) attached to Databricks cluster should grant PutObject to your schema prefix and Read/Write for checkpoints.
+
+	3) DBFS vs direct S3 for checkpoints
+	   - DBFS root on AWS is backed by S3. Use a stable, dedicated checkpoint path. Avoid mounting issues or path moves.
+	   - Avoid cleaning active checkpoint directories. Corrupted checkpoints cause replays → perceived lag.
+
+	4) S3 consistency
+	   - S3 is strongly consistent for new PUTs and LIST/GET in the same region (modern AWS). If you see missing objects briefly, check for eventual-listing issues in custom tooling, not typical in Spark.
+
+	C) Databricks cluster and JVM tuning
+
+	1) Cluster sizing
+	   - If addBatch time is high and CPU is busy, add worker cores or scale out.
+	   - If JVM GC time is high (Spark UI → Executors), increase executor memory or reduce per-batch work.
+
+	2) Spark S3A client options (cluster Spark conf) if heavy S3 I/O
+	   - fs.s3a.connection.maximum (e.g., 200–500)
+	   - fs.s3a.threads.max (align with connection.maximum)
+	   - fs.s3a.fast.upload = true
+	   - Keep retries sane; your code already retries S3 PUTs for schemas (small objects).
+
+	3) Trigger and batch sizing
+	   - Add a predictable cadence while debugging:
+		 .trigger(processingTime="10 seconds")
+	   - Limit per-batch ingestion if needed:
+		 .option("maxOffsetsPerTrigger", 5000)
+	   - These help stabilize batch sizes and make issues visible.
+
+	D) MSK (Kafka) specifics on AWS
+
+	1) Network path
+	   - Place Databricks workers in subnets with route to MSK brokers (same VPC/peered VPC). Check SGs and NACLs.
+	   - Prefer TLS 9094 (as per your MSK setup) with correct truststore config in kafka_conf.
+
+	2) CloudWatch metrics to watch
+	   - kafka.server.BrokerTopicMetrics (ingress/egress)
+	   - kafka.network.RequestMetrics (request latency)
+	   - Consumer lag metrics via MSK/CloudWatch or Prometheus if enabled
+	   - If consumer lag grows but Spark batches are short, the group may be misconfigured or blocked; check auth/ACLs and errors.
+
+	E) Practical improvements for schema_writer
+
+	1) Reduce redundant writes within a batch
+	   - If the schema topic can contain duplicates in the same micro-batch, add a distinct:
+		 df = df.dropDuplicates(["db_schema_tbl", "schema_fingerprint"])
+		 before foreachBatch to minimize repeated S3 PUTs.
+
+	2) Keep idempotency strong
+	   - Ensure completed_batches table schema matches what StreamingBatchManager writes.
+	   - The current/previous month filter already protects month-boundary replays.
+
+	3) Keep S3 prefixes simple and hot
+	   - Avoid extremely deep nesting or tiny partitions that cause many small LIST calls elsewhere.
+	   - For this job, object count is small, but avoid unnecessary renames/moves.
+
+	4) Observe retries and failures
+	   - Driver logs (Databricks → Driver logs) show exceptions in foreachBatch (S3 errors, permissions).
+	   - If you see repeated retries, investigate IAM permissions, bucket policies, or VPC endpoint policies.
+
+	F) Quick diagnostics flow
+
+	1) Open Spark UI → Structured Streaming → verify batchId increments, numInputRows, durationMs.
+	2) Print streaming_query.lastProgress; compare addBatch vs total triggerExecution.
+	3) Query completed_batches; ensure steady, unique batch_ids and recent timestamps.
+	4) Check S3 CloudWatch metrics for throttling/latency; confirm bucket region alignment.
+	5) Check MSK consumer lag via CloudWatch or CLI; verify network and ACLs.
+	6) If unstable, add trigger(processingTime="10s") and maxOffsetsPerTrigger to normalize batches while debugging.
+
+	G) Rules of thumb
+
+	1) Keep everything in-region (Databricks workspace, MSK, S3 buckets).
+	2) Use VPC endpoints for S3 and PrivateLink/peering for MSK to minimize latency.
+	3) Right-size the cluster; watch GC and CPU in Spark UI.
+	4) Leverage checkpoints + completed_batches for exactly-once behavior.
+	5) For schema_writer, most lag is storage/network related; volume is rarely the limiting factor.
+

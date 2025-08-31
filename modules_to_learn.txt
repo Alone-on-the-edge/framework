@@ -1,0 +1,96 @@
+Module:
+========
+1.typing : Optional means, it can be None
+2.dataclass
+3.inspect:inspect module is a powerful tool for introspection, source code analysis, and runtime examination. It is especially useful in debugging, dynamic frameworks, and 
+        metaprogramming. With tools like inspect, you can unlock deeper insights into Python's runtime behavior, making it invaluable for advanced Python development.
+4.requests
+5.collections
+6.json and its methods
+
+
+
+Databricks specific:
+====================
+1. databricks_cli: How to use cli to get cluster, jobs, runs, pipelines, sdk info
+2. databricks.sdk
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Concepts:
+=========
+dataclass :	dataclasses.fields
+df.schema.fieldNames()
+df.dtypes -> print(df.dtypes): # Get the data type of the 'age' column : age_dtype = dict(df.dtypes)["age"]
+setattr in dictionary
+when do we use asDict : In PySpark, the asDict() method is used to convert a Row object into a Python dictionary.
+flow_spec_row.asDict(recursive=True)
+uuid
+@property: built-in decorator.Allows you to define a method in a class that can be accessed like an attribute.Avoids the need for explicit getter methods, enhancing code readability.
+
+
+
+DATACLASS: This is defined mainly to work with CLASS LEVEL VARIABLES.
+
+field:
+	from dataclasses import dataclass
+
+		@dataclass
+		class Person:
+			name: str
+			age: int = 30
+
+		p = Person(name="Alice")
+		print(p)  # Outputs: Person(name='Alice', age=30)
+
+		from dataclasses import dataclass, field
+
+	This provides the same default value, but allows additional customization and control over the field.
+		Behavior:
+			Sets the default value to 30, just like age: int = 30.
+			You can add extra parameters (e.g., init, repr, compare, metadata, or default_factory).
+			Useful for more advanced scenarios where customization is needed.
+			
+		@dataclass
+		class Person:
+			name: str
+			age: int = field(default=30, repr=False, compare=False)
+
+		p = Person(name="Alice")
+		print(p)  # Outputs: Person(name='Alice') (age is excluded from repr)
+
+	Special Case: Mutable Defaults :One key reason to use field() is when dealing with mutable default values like lists or dictionaries. The direct assignment approach (hobbies: list = []) can lead to shared mutable defaults across instances, which can cause unexpected bugs.
+	
+	@dataclass
+	class Person:
+		name: str
+		hobbies: list = []  # Shared mutable default!
+		hobbies: list = field(default_factory=list)  # Separate mutable defaults and CORRECT WAY
+		
+	p1 = Person(name="Alice")
+	p2 = Person(name="Bob")
+	p1.hobbies.append("Reading")
+	
+	WRONG OUTPUT:
+	print(p1.hobbies)  # Outputs: ['Reading']
+	print(p2.hobbies)  # Outputs: [] (As expected)
+	
+	CORRECT WAY OUTPUT:
+	print(p1.hobbies)  # Outputs: ['Reading']
+	print(p2.hobbies)  # Outputs: ['Reading'] (Unexpected!)
+
+MISSING: Detecting Required Fields You can use MISSING to check if a field has no default value and is therefore required during initialization.
+		If you define a dataclass field without specifying a default or default_factory, the MISSING sentinel is used internally for that field.
+		This is necessary because in some cases you may want to check whether a field has a default value or not.

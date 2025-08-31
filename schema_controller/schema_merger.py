@@ -9,14 +9,14 @@ from pyspark.sql import SparkSession, DataFrame, functions as F
 from pyspark.sql.streaming import StreamingQuery
 from pyspark.sql.types import StringType, LongType
 
-from ssot.common.context import JobContext
-from ssot.common.control_spec import FlowSpec
-from ssot.common.types.merge_type import merge_schema_from_ddl, SchemaMergeError, handle_numeric_as_string
-from ssot.common.utils import FlowErrorLogger, is_active_flow, cast_with_cdc_schema, s3_path_exists, split_s3_path, \
+from common.context import JobContext
+from common.control_spec import FlowSpec
+from common.types.merge_type import merge_schema_from_ddl, SchemaMergerError, handle_numeric_as_string
+from common.utils import FlowErrorLogger, is_active_flow, cast_with_cdc_schema, s3_path_exists, split_s3_path, \
     get_additional_fields_schema, get_dlt_fields_schema
-from ssot.common.worker import wait_until
-from ssot.schema_controller.common import StreamType, StreamingBatchManager, FlowLifeCycleManager
-from ssot.common.schema_change_notifier import notify_ddl_event
+from common.worker import wait_until
+from schema_controller.common import StreamType, StreamingBatchManager, FlowLifeCycleManager
+from common.schema_change_notifier import notify_ddl_event
 
 # Schema Merger: responsible for merging schemas from S3 using autoloader, updating control tables,
 # and overwriting existing data with new schema.
@@ -258,7 +258,7 @@ def merge_schemas(schemas_batch_df: DataFrame, batch_id: str):
                     if merged_schema != existing_cdc_schema:
                         notify_ddl_event(merged_schema, flow_id, job_ctx)
 
-            except SchemaMergeError:
+            except SchemaMergerError:
                 flow_err_logger.log(flow_id=flow_id,
                                     error_desc='Failure occurred while merging schemas',
                                     error_trace=traceback.format_exc(),
@@ -375,7 +375,7 @@ def start_schema_merger():
         .format("cloudFiles")
         .option("cloudFiles.format", "text")
         .option("cloudFiles.backfillInterval", "1 hour")
-        .load(job_ctx.get_schema_dir())
+        .load(job_ctx.get_schemas_dir())
         .withColumn("schema_path", F.input_file_name())
         .withColumnRenamed("value", "avro_schema")
     )

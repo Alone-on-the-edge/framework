@@ -1,0 +1,13 @@
+"""
+Execution order:
+  1) start_schema_merger()  -> stream (Auto Loader)
+  2) foreachBatch           -> merge_schemas(...)
+  3) merge_schemas:
+       - active flows & rows
+       - merge DDLs & classify
+       - stop pipelines
+       - update control / overwrite if needed
+       - restart & complete batch
+Key types:
+  CdcSchema(schema_ddl, schema_fingerprints:set[int], needs_schema_overwrite:bool)
+"""

@@ -5,21 +5,12 @@ from pyspark.sql.streaming import StreamingQuery #StreamingQuery lets you monito
 from pyspark.sql.types import StringType
 
 from common.context import JobContext
-from common.udfs import normalize_message_key, get_schema_path, get_table_name, is_active_event_udf, \
-    get_schema_id_udf
-from common.utils import save_s3_object, broadcast_tbl_vs_inactive_schemas, broadcast_db_schema_vs_id
+from common.udfs import normalize_message_key, get_schema_path
+from common.utils import save_s3_object
 from schema_controller.common import StreamingBatchManager, StreamType
 
 # Schema writer is responsible for saving events to s3 from kafka
 streaming_query: StreamingQuery
-
-
-@F.udf
-def resolve_schema_dir(is_active_event: bool):
-    if is_active_event:
-        return job_ctx.get_schema_dir(include_bucket=False)
-    else:
-        return job_ctx.get_inactive_schemas_dir(include_bucket=False)
 
 
 def start_schema_writer():
@@ -40,11 +31,9 @@ def start_schema_writer():
             "generate_schema_fingerprint(value) AS schema_fingerprint",
             f"preprocess_schema(value, {app_spec.bronze_reader_opts.get('preserve_case', 'false')}, {app_spec.silver_spark_conf['dataflow.maxDecimalScale']}) AS avro_schema"
         )
-        .withColumn("src_table", get_table_name("db_schema_tbl"))
-        .withColumn("schema_id", get_schema_id_udf(db_schema_vs_id, "db_schema_tbl"))
-        .withColumn("is_active_event", is_active_event_udf(tbl_vs_inactive_schemas, "src_table", "schema_id"))
-        .withColumn("schemas_dir",resolve_schema_dir("is_active_event"))
-        .withColumn("schema_s3_path",get_schema_path("schemas_dir", "db_schema_tbl", "schema_fingerprint"))
+        .withColumn("schema_s3_path",get_schema_path(F.lit(job_ctx.get_schemas_dir(include_bucket=False)),
+                                                     F.col("db_schema_tbl"),
+                                                     F.col("schema_fingerprint")))
     )
 
     def save_schemas(schemas_batch_df, batch_id):
@@ -72,10 +61,9 @@ if __name__ == '__main__':
     spark = SparkSession.getActiveSession()
     spark.sparkContext._jvm.com.adp.ssot.SparkUserDefinedFunctions.register()
     job_ctx = JobContext.from_notebook_config()
-    tbl_vs_inactive_schemas = broadcast_tbl_vs_inactive_schemas(job_ctx.get_app_spec())
-    db_schema_vs_id = broadcast_db_schema_vs_id(job_ctx)
-
     start_schema_writer()
     
+
+#Four extra lines are comments in save_schemas function.     
 
 
