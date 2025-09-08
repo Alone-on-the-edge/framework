@@ -11,3 +11,16 @@ Execution order:
 Key types:
   CdcSchema(schema_ddl, schema_fingerprints:set[int], needs_schema_overwrite:bool)
 """
+MERGE_SCHEMAS:
+1. If batch is not completed or batch is not empty (batch is from streaming query)
+-> Identify active flows(schrema_refresh_done is True and spec.is_active is True)
+	and then create a dict of "flow_vs_existing_schema" flow_id as key and cdc_schema(cdc_schema, fingerprint, and needs_schema_overwrite=False) as value.
+->For each (flow_id, avro_schema, fingerprint, schema_path) in this micro-batch:
+	Convert Avro JSON → Spark DDL.
+	Get the current schema for this flow (from the control table or already-merged ones).
+	Try to merge the two schemas (incoming vs. existing).
+	Record:
+	Updated DDL
+	Combined fingerprints
+	Whether a physical overwrite is required.
+	Save it in flow_vs_merged_schema.
