@@ -14,7 +14,7 @@ streaming_query: StreamingQuery
 
 
 def start_schema_writer():
-    app_spec = job_ctx.get_app_spec()
+    app_spec = job_ctx.get_app_spec() 
     stream =  (
         spark.readStream
         .format("kafka")
@@ -65,5 +65,30 @@ if __name__ == '__main__':
     
 
 #Four extra lines are comments in save_schemas function.     
+# How the streaming is working here:
+
+#************You call writeStream ON the DataFrame named `stream`.*******************
+
+# Correct understanding of the flow
+
+# 1) `stream` is a streaming DataFrame you built (cast key/value → normalize key → filter wrapper → selectExpr → add schema_s3_path).
+
+# 2) You call `stream.writeStream.foreachBatch(...)`. Because writeStream is called ON `stream`, Spark will materialize EACH micro-batch from `stream` and pass it to your function.
+
+# 3) For every micro-batch, Spark provides:
+#    - `schema_batch_df` (a static DataFrame containing the rows from that batch)
+#    - `batch_id` (the micro-batch sequence number for this StreamingQuery run)
+#    These two are the arguments to `save_schemas(schema_batch_df, batch_id)`.
+
+# 4) Inside `save_schemas`:
+#    - It checks `df.isEmpty()` and `is_completed_batch(query.id, batch_id)`.
+#    - If not skipped, it loops rows: `df.foreach(lambda row: save_s3_object(bucket, key=row['schema_s3_path'], content=row['avro_schema']))`.
+#    - After all rows are written, it logs the batch via `log_completed_batch(query.id, batch_id)`.
+
+# 5) Net effect:
+#    - Scenario with 20 rows: up to 20 S3 puts (one per row) then mark batch complete.
+#    - Scenario with 1 row: 1 S3 put then mark batch complete.
+#    - If Spark replays a batch, the completed-batch check skips reprocessing (idempotent).
+
 
 
